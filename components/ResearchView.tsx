@@ -758,7 +758,6 @@ export const ResearchView: React.FC<ResearchViewProps> = ({ onBackToChat }) => {
                   )}
                 </button>
                 
-                <button
               </div>
             </div>
 
