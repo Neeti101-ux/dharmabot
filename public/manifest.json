@@ -1,0 +1,68 @@
+{
+  "name": "Dharmabot - AI Legal Assistant",
+  "short_name": "Dharmabot",
+  "description": "AI-powered legal assistant for Indian law. Chat with AI, draft documents, research legal topics, and find lawyers.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#dc2626",
+  "orientation": "portrait-primary",
+  "scope": "/",
+  "lang": "en",
+  "categories": ["productivity", "education", "business"],
+  "icons": [
+    {
+      "src": "/Logos copy.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/Logos copy.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/Logos copy.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide"
+    },
+    {
+      "src": "/Logos copy.png",
+      "sizes": "750x1334",
+      "type": "image/png",
+      "form_factor": "narrow"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "New Chat",
+      "short_name": "Chat",
+      "description": "Start a new legal consultation",
+      "url": "/",
+      "icons": [
+        {
+          "src": "/Logos copy.png",
+          "sizes": "96x96"
+        }
+      ]
+    },
+    {
+      "name": "Find Lawyer",
+      "short_name": "Lawyers",
+      "description": "Find qualified legal professionals",
+      "url": "/?view=findLawyer",
+      "icons": [
+        {
+          "src": "/Logos copy.png",
+          "sizes": "96x96"
+        }
+      ]
+    }
+  ],
+  "prefer_related_applications": false
+}
