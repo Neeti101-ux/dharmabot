@@ -1,47 +1,30 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
+import RichTextEditor from './RichTextEditor';
 import { Header } from './Header';
 import { Footer } from './Footer';
-import { RichTextEditor } from './RichTextEditor';
-import { generateDocument } from '../services/geminiService';
-import { transcribeAudioWithGemini } from '../services/geminiService';
-import { saveDocumentDraft, getDocumentDrafts, deleteDocumentDraft } from '../services/documentDraftingStorageService';
-import { Document, Packer, Paragraph, TextRun, HeadingLevel, UnderlineType, ShadingType, AlignmentType, ExternalHyperlink, IRunOptions } from 'docx';
-import saveAs from 'file-saver';
+// Removed LoadingSpinner import as full-page overlay is used for loading
+import { Document, Packer, Paragraph, TextRun, HeadingLevel as DocxHeadingLevel, AlignmentType as DocxAlignmentType, UnderlineType, Numbering, Indent as DocxIndentClass, IRunOptions, ShadingType, PageOrientation, IIndentAttributesProperties } from 'docx';
+import saveAsFile from 'file-saver';
 import { marked } from 'marked';
+import { generateDocumentDraftFromInstruction, transcribeAudioWithGemini, rephraseQueryForAI } from '../services/geminiService'; 
+import { AIResponse, SavedDraft } from '../types'; 
+import { DRAFTING_SUGGESTED_PROMPTS } from '../services/draftingPrompts';
+import { getAllSavedDrafts, saveDraft, deleteSavedDraft } from '../services/documentDraftingStorageService';
+
+const generateUUID = () => crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15);
 
 interface DocumentDraftingViewProps {
   onBackToChat: () => void;
+  currentInstructions: string;
+  onInstructionsChange: React.Dispatch<React.SetStateAction<string>>; // Updated type
+  currentTitle: string;
+  onTitleChange: (title: string) => void;
+  currentContent: string;
+  onContentChange: (content: string) => void;
 }
 
-interface DocumentDraft {
-  id: string;
-  title: string;
-  instructions: string;
-  content: string;
-  timestamp: number;
-}
-
-const MicIcon = ({ className }: { className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className || "w-5 h-5"}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
-  </svg>
-);
-
-const StopIcon = ({ className }: { className?: string }) => (
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className || "w-5 h-5"}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
-  </svg>
-);
-
-const SpinnerIcon = ({ className }: { className?: string }) => (
-  <svg className={`animate-spin ${className || "h-5 w-5 text-white"}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-  </svg>
-);
-
-// Helper function to process HTML nodes for DOCX conversion
-const processNodeForDocx = (node: Node, currentListFormat?: { level: number; type: 'bullet' | 'number' }): (Paragraph | null)[] => {
+// Export this function so it can be used by ResearchView
+export const processNodeForDocx = (node: Node, currentListFormat?: { level: number; type: 'bullet' | 'number' }): (Paragraph | null)[] => {
   const paragraphs: Paragraph[] = [];
 
   const getRunsForElement = (elementNode: HTMLElement, inheritedStyle: IRunOptions = {}): TextRun[] => {
@@ -76,13 +59,28 @@ const processNodeForDocx = (node: Node, currentListFormat?: { level: number; typ
   if (node.nodeType === Node.ELEMENT_NODE) {
     const element = node as HTMLElement;
     let paragraphChildren: TextRun[] = [];
-    let currentHeadingLevel: typeof HeadingLevel[keyof typeof HeadingLevel] | undefined = undefined;
-    let currentAlignmentType: typeof AlignmentType[keyof typeof AlignmentType] | undefined = undefined;
+    let currentHeadingLevel: typeof DocxHeadingLevel[keyof typeof DocxHeadingLevel] | undefined = undefined;
+    let currentAlignmentType: typeof DocxAlignmentType[keyof typeof DocxAlignmentType] | undefined = undefined;
+    let indentAttributes: IIndentAttributesProperties | undefined = undefined;
+
+
+    if(element.classList.contains('ql-align-center')) currentAlignmentType = DocxAlignmentType.CENTER;
+    if(element.classList.contains('ql-align-right')) currentAlignmentType = DocxAlignmentType.RIGHT;
+    if(element.classList.contains('ql-align-justify')) currentAlignmentType = DocxAlignmentType.JUSTIFIED;
+
+    const indentMatch = Array.from(element.classList).find(cls => cls.startsWith('ql-indent-'));
+    if (indentMatch) {
+      const indentLevel = parseInt(indentMatch.split('-')[2]);
+      if (!isNaN(indentLevel) && indentLevel > 0) {
+          indentAttributes = { left: indentLevel * 720 }; 
+      }
+    }
+
 
     switch (element.tagName) {
-      case 'H1': currentHeadingLevel = HeadingLevel.HEADING_1; paragraphChildren = getRunsForElement(element); break;
-      case 'H2': currentHeadingLevel = HeadingLevel.HEADING_2; paragraphChildren = getRunsForElement(element); break;
-      case 'H3': currentHeadingLevel = HeadingLevel.HEADING_3; paragraphChildren = getRunsForElement(element); break;
+      case 'H1': currentHeadingLevel = DocxHeadingLevel.HEADING_1; paragraphChildren = getRunsForElement(element); break;
+      case 'H2': currentHeadingLevel = DocxHeadingLevel.HEADING_2; paragraphChildren = getRunsForElement(element); break;
+      case 'H3': currentHeadingLevel = DocxHeadingLevel.HEADING_3; paragraphChildren = getRunsForElement(element); break;
       case 'P': paragraphChildren = getRunsForElement(element); break;
       case 'UL':
       case 'OL':
@@ -100,16 +98,17 @@ const processNodeForDocx = (node: Node, currentListFormat?: { level: number; typ
         paragraphChildren = getRunsForElement(element);
         break;
       case 'BLOCKQUOTE':
-        paragraphChildren = getRunsForElement(element);
-        break;
+          paragraphChildren = getRunsForElement(element);
+          indentAttributes = { left: 720, ...(indentAttributes || {}) }; 
+          break;
       case 'PRE': 
-        paragraphChildren = getRunsForElement(element);
-        paragraphs.push(new Paragraph({ 
-          children: paragraphChildren, 
-          shading: { type: ShadingType.SOLID, color: "auto", fill: "F1F1F1" },
-          style: "CodeBlock" 
-        }));
-        return paragraphs; 
+          paragraphChildren = getRunsForElement(element);
+          paragraphs.push(new Paragraph({ 
+              children: paragraphChildren, 
+              shading: { type: ShadingType.SOLID, color: "auto", fill: "F1F1F1" },
+              style: "CodeBlock" 
+          }));
+          return paragraphs; 
       default: 
         if (element.textContent?.trim()) {
           paragraphChildren = getRunsForElement(element);
@@ -122,6 +121,7 @@ const processNodeForDocx = (node: Node, currentListFormat?: { level: number; typ
       const paraProps: any = { children: paragraphChildren };
       if (currentHeadingLevel) paraProps.heading = currentHeadingLevel;
       if (currentAlignmentType) paraProps.alignment = currentAlignmentType;
+      if (indentAttributes && !currentListFormat) paraProps.indent = indentAttributes;
 
       if (currentListFormat) {
         if (currentListFormat.type === 'bullet') {
@@ -138,143 +138,186 @@ const processNodeForDocx = (node: Node, currentListFormat?: { level: number; typ
   return paragraphs.length > 0 ? paragraphs : [null];
 };
 
-export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBackToChat }) => {
-  const [currentInstructions, setCurrentInstructions] = useState<string>('');
-  const [currentContent, setCurrentContent] = useState<string>('');
-  const [currentTitle, setCurrentTitle] = useState<string>('');
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
-  const [savedDrafts, setSavedDrafts] = useState<DocumentDraft[]>([]);
+export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ 
+    onBackToChat,
+    currentInstructions,
+    onInstructionsChange,
+    currentTitle,
+    onTitleChange,
+    currentContent,
+    onContentChange
+}) => {
+  // Local state for UI interactions, not core data
+  const [isLoading, setIsLoading] = useState<boolean>(false); 
+  const [error, setError] = useState<string | null>(null); 
+  const [showSuggestedPrompts, setShowSuggestedPrompts] = useState<boolean>(false);
 
-  // Dictation state
+  // Saved drafts state
+  const [savedDrafts, setSavedDrafts] = useState<SavedDraft[]>([]);
+  const [showSavedDrafts, setShowSavedDrafts] = useState<boolean>(false);
+
+  // Dictation specific state (remains local as it's transient to this view's action)
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
   const [dictationError, setDictationError] = useState<string | null>(null);
-  const [displayDuration, setDisplayDuration] = useState<number>(0);
-
-  // Audio recording refs
+  const [optimizeDraftingPromptEnabled, setOptimizeDraftingPromptEnabled] = useState<boolean>(true);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordedMimeTypeRef = useRef<string | null>(null);
-  const recordingStartTimeRef = useRef<number | null>(null);
-  const timerIntervalRef = useRef<number | null>(null);
-
-  // Audio visualization refs (removed canvas-related refs)
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const analyserRef = useRef<AnalyserNode | null>(null);
-  const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const animationFrameIdRef = useRef<number | null>(null);
-  const dataArrayRef = useRef<Uint8Array | null>(null);
 
   const navigateToDocumentation = () => {
     window.open('/documentation', '_blank');
   };
 
+  const editorContentRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const quillEditorNode = document.querySelector('.ql-editor');
+    if (quillEditorNode) {
+      editorContentRef.current = quillEditorNode as HTMLDivElement;
+    }
+  }, [currentContent]); 
+
   useEffect(() => {
     loadSavedDrafts();
-    return () => {
-      stopRecordingCleanup();
-    };
   }, []);
 
   const loadSavedDrafts = () => {
-    const drafts = getDocumentDrafts();
+    const drafts = getAllSavedDrafts();
     setSavedDrafts(drafts);
   };
 
-  const stopRecordingCleanup = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop();
+  const handleGenerateDocument = async () => {
+    if (!currentInstructions.trim()) {
+      setError("Please provide instructions for the document.");
+      return;
     }
-    mediaRecorderRef.current?.stream?.getTracks().forEach(track => track.stop());
-    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
-      audioContextRef.current.close();
+    setIsLoading(true);
+    setError(null);
+    setDictationError(null);
+    onContentChange(''); // Clear previous content from shared state
+
+    try {
+      let finalInstructions = currentInstructions;
+      
+      // Step 1: Optimize the instructions if enabled
+      if (optimizeDraftingPromptEnabled) {
+        console.log("Original drafting instructions:", currentInstructions);
+        finalInstructions = await rephraseQueryForAI(currentInstructions);
+        console.log("Optimized drafting instructions:", finalInstructions);
+      }
+      
+      console.log("Requesting document draft with instructions:", currentInstructions);
+      const aiResponse: AIResponse = await generateDocumentDraftFromInstruction(finalInstructions);
+      
+      if (aiResponse.text.startsWith("Error:")) {
+          console.error("AI generation error:", aiResponse.text);
+          setError(aiResponse.text);
+          onContentChange(''); 
+      } else {
+          // Debug Step 1: Log the raw Markdown content received from AI
+          console.log("=== DEBUGGING MARKDOWN RENDERING ===");
+          console.log("1. Raw Markdown from AI (first 500 chars):", aiResponse.text.substring(0, 500));
+          console.log("1. Raw Markdown contains # symbols:", aiResponse.text.includes('#'));
+          console.log("1. Raw Markdown contains * symbols:", aiResponse.text.includes('*'));
+          
+          // Step 1.5: Clean the AI response by removing markdown code block wrapper
+          let cleanedMarkdown = aiResponse.text;
+          
+          // Remove markdown code block wrapper if present
+          if (cleanedMarkdown.startsWith('```markdown\n') || cleanedMarkdown.startsWith('```markdown ')) {
+            cleanedMarkdown = cleanedMarkdown.replace(/^```markdown\s*\n/, '').replace(/\n```$/, '');
+            console.log("1.5. Removed markdown code block wrapper");
+          } else if (cleanedMarkdown.startsWith('```\n') && cleanedMarkdown.includes('#')) {
+            // Handle case where it's just ``` without language identifier
+            cleanedMarkdown = cleanedMarkdown.replace(/^```\s*\n/, '').replace(/\n```$/, '');
+            console.log("1.5. Removed generic code block wrapper");
+          }
+          
+          console.log("1.5. Cleaned Markdown (first 500 chars):", cleanedMarkdown.substring(0, 500));
+          
+          marked.setOptions({ gfm: true, breaks: true }); 
+          const htmlContent = marked.parse(cleanedMarkdown) as string;
+          
+          // Debug Step 2: Log the converted HTML content
+          console.log("2. Converted HTML (first 500 chars):", htmlContent.substring(0, 500));
+          console.log("2. HTML contains <h1> tags:", htmlContent.includes('<h1>'));
+          console.log("2. HTML contains <strong> tags:", htmlContent.includes('<strong>'));
+          console.log("2. HTML contains <p> tags:", htmlContent.includes('<p>'));
+          console.log("2. HTML still contains # symbols:", htmlContent.includes('#'));
+          console.log("2. HTML still contains * symbols:", htmlContent.includes('*'));
+          
+          onContentChange(htmlContent);
+          
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = htmlContent;
+          const h1Element = tempDiv.querySelector('h1');
+          if (h1Element && h1Element.textContent) {
+            onTitleChange(h1Element.textContent.trim() || "Generated Document");
+          } else if (!currentTitle || currentTitle === "Untitled Document") {
+            onTitleChange("Generated Document");
+          }
+      }
+    } catch (e) {
+      console.error("Failed to generate document:", e);
+      const message = e instanceof Error ? e.message : "An unknown error occurred during document generation.";
+      setError(message);
+      onContentChange('');
+    } finally {
+      setIsLoading(false);
     }
-    if (animationFrameIdRef.current) {
-      cancelAnimationFrame(animationFrameIdRef.current);
-    }
-    if (timerIntervalRef.current) {
-      clearInterval(timerIntervalRef.current);
-    }
-    mediaRecorderRef.current = null;
-    audioContextRef.current = null;
-    analyserRef.current = null;
-    sourceNodeRef.current = null;
-    animationFrameIdRef.current = null;
-    timerIntervalRef.current = null;
-    recordingStartTimeRef.current = null;
   };
 
   const handleDictateClick = async () => {
     setError(null);
     setDictationError(null);
 
-    if (isTranscribing) return;
+    if (isTranscribing) return; 
 
     if (isRecording) {
       mediaRecorderRef.current?.stop();
     } else {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        setIsRecording(true);
-        setDisplayDuration(0);
-        
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        analyserRef.current = audioContextRef.current.createAnalyser();
-        sourceNodeRef.current = audioContextRef.current.createMediaStreamSource(stream);
-        sourceNodeRef.current.connect(analyserRef.current);
-        analyserRef.current.fftSize = 2048;
-        dataArrayRef.current = new Uint8Array(analyserRef.current.frequencyBinCount);
-
         mediaRecorderRef.current = new MediaRecorder(stream);
         audioChunksRef.current = [];
-        let tempRecordedMimeType: string | null = null;
 
         mediaRecorderRef.current.ondataavailable = (event) => audioChunksRef.current.push(event.data);
         
         mediaRecorderRef.current.onstart = () => {
-          if (mediaRecorderRef.current) {
-            tempRecordedMimeType = mediaRecorderRef.current.mimeType;
-            console.log("Recording started with MIME type:", tempRecordedMimeType);
-          }
-          recordingStartTimeRef.current = Date.now();
-          timerIntervalRef.current = window.setInterval(() => {
-            if (recordingStartTimeRef.current) {
-              const currentDuration = Math.floor((Date.now() - recordingStartTimeRef.current) / 1000);
-              setDisplayDuration(currentDuration);
+            if (mediaRecorderRef.current) {
+                 recordedMimeTypeRef.current = mediaRecorderRef.current.mimeType;
+                 console.log("Recording started with MIME type:", recordedMimeTypeRef.current);
             }
-          }, 1000);
         };
 
         mediaRecorderRef.current.onstop = async () => {
-          const finalDuration = Math.floor((Date.now() - (recordingStartTimeRef.current || Date.now())) / 1000);
-          stopRecordingCleanup();
           setIsRecording(false);
           setIsTranscribing(true);
-          setDisplayDuration(finalDuration);
-          
-          if (audioChunksRef.current.length === 0 || !tempRecordedMimeType) {
-            setDictationError("No audio recorded.");
+          stream.getTracks().forEach(track => track.stop()); 
+
+          if (audioChunksRef.current.length === 0 || !recordedMimeTypeRef.current) {
+            setDictationError("No audio recorded or MIME type not captured.");
             setIsTranscribing(false);
             return;
           }
 
-          const audioBlob = new Blob(audioChunksRef.current, { type: tempRecordedMimeType });
+          const audioBlob = new Blob(audioChunksRef.current, { type: recordedMimeTypeRef.current });
           const reader = new FileReader();
           reader.readAsDataURL(audioBlob);
           reader.onloadend = async () => {
-            const base64AudioData = (reader.result as string)?.split(',')[1];
+            const base64AudioData = (reader.result as string).split(',')[1];
             if (!base64AudioData) {
               setDictationError("Failed to convert audio to base64.");
               setIsTranscribing(false);
               return;
             }
             try {
-              const transcriptionResponse = await transcribeAudioWithGemini(base64AudioData, tempRecordedMimeType!);
+              const transcriptionResponse = await transcribeAudioWithGemini(base64AudioData, recordedMimeTypeRef.current!);
               if (transcriptionResponse.text.startsWith("Error:")) {
                 setDictationError(transcriptionResponse.text);
               } else {
-                setCurrentInstructions((prev: string) => (prev ? prev + " " : "") + transcriptionResponse.text);
+                onInstructionsChange((prev: string) => (prev ? prev + " " : "") + transcriptionResponse.text);
               }
             } catch (e) {
               const message = e instanceof Error ? e.message : "Transcription failed.";
@@ -294,14 +337,14 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
         };
         
         mediaRecorderRef.current.onerror = (event) => {
-          console.error("MediaRecorder error:", event);
-          setDictationError(`Recording error: ${(event as any).error?.name || 'Unknown recording error'}`);
-          setIsRecording(false);
-          stream.getTracks().forEach(track => track.stop());
+            console.error("MediaRecorder error:", event);
+            setDictationError(`Recording error: ${(event as any).error?.name || 'Unknown recording error'}`);
+            setIsRecording(false);
+            stream.getTracks().forEach(track => track.stop());
         };
 
         mediaRecorderRef.current.start();
-        recordedMimeTypeRef.current = tempRecordedMimeType;
+        setIsRecording(true);
 
       } catch (err) {
         console.error("Error accessing microphone:", err);
@@ -311,118 +354,70 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
     }
   };
 
-  const formatTime = (seconds: number): string => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
-
-  const handleGenerateDocument = async () => {
-    if (!currentInstructions.trim()) {
-      setError('Please provide instructions for document generation');
-      return;
-    }
-
-    setIsLoading(true);
-    setError(null);
-    setDictationError(null);
-
-    try {
-      const result = await generateDocument(currentInstructions);
-      setCurrentContent(result);
-      if (!currentTitle) {
-        const firstLine = currentInstructions.split('\n')[0];
-        setCurrentTitle(firstLine.substring(0, 50) + (firstLine.length > 50 ? '...' : ''));
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'An error occurred while generating the document');
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
   const handleSaveDraft = () => {
     if (!currentInstructions.trim() && !currentContent.trim()) {
-      setError('Please provide instructions or content to save');
+      setError("Cannot save empty draft. Please add instructions or content.");
       return;
     }
 
-    const draft: DocumentDraft = {
-      id: crypto.randomUUID(),
-      title: currentTitle || 'Untitled Document',
+    const draft: SavedDraft = {
+      id: generateUUID(),
+      title: currentTitle || 'Untitled Draft',
       instructions: currentInstructions,
       content: currentContent,
-      timestamp: Date.now(),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
     };
 
-    saveDocumentDraft(draft);
+    saveDraft(draft);
     loadSavedDrafts();
-    alert('Draft saved successfully!');
+    setError(null);
+    alert("Draft saved successfully!");
   };
 
-  const handleLoadDraft = (draft: DocumentDraft) => {
-    setCurrentTitle(draft.title);
-    setCurrentInstructions(draft.instructions);
-    setCurrentContent(draft.content);
+  const handleLoadDraft = (draft: SavedDraft) => {
+    if (isLoading || isRecording || isTranscribing) return;
+    
+    if ((currentInstructions.trim() || currentContent.trim()) && 
+        !window.confirm('Loading a draft will replace your current work. Continue?')) {
+      return;
+    }
+
+    onInstructionsChange(draft.instructions);
+    onTitleChange(draft.title);
+    onContentChange(draft.content);
+    setError(null);
+    setDictationError(null);
   };
 
-  const handleDeleteDraft = (id: string) => {
-    if (window.confirm('Are you sure you want to delete this draft?')) {
-      deleteDocumentDraft(id);
+  const handleDeleteDraft = (draftId: string, draftTitle: string) => {
+    if (window.confirm(`Are you sure you want to delete the draft "${draftTitle}"? This action cannot be undone.`)) {
+      deleteSavedDraft(draftId);
       loadSavedDrafts();
     }
   };
 
-  const handleStartNewDocument = () => {
-    if (isLoading || isRecording || isTranscribing) return;
-    
-    if ((currentInstructions || currentContent) && !window.confirm('Starting a new document will clear your current work. Continue?')) {
+  const handleExportDOCX = useCallback(async () => {
+    if (!editorContentRef.current || !editorContentRef.current.innerHTML.trim()) {
+      alert("Editor content is empty for DOCX export.");
       return;
     }
-    
-    setCurrentInstructions('');
-    setCurrentContent('');
-    setCurrentTitle('');
+    setIsLoading(true);
     setError(null);
     setDictationError(null);
-  };
-
-  const onInstructionsChange = (value: string) => {
-    setCurrentInstructions(value);
-  };
-
-  const onContentChange = (value: string) => {
-    setCurrentContent(value);
-  };
-
-  const onTitleChange = (value: string) => {
-    setCurrentTitle(value);
-  };
-
-  const handleExportDOCX = async () => {
-    if (!currentContent.trim()) return;
-
-    setIsLoading(true);
 
     try {
-      // Parse the Markdown content to HTML
-      marked.setOptions({ gfm: true, breaks: true });
-      const htmlContent = marked.parse(currentContent) as string;
-      
-      // Create a temporary div to parse the HTML
       const tempDiv = document.createElement('div');
-      tempDiv.innerHTML = htmlContent;
+      tempDiv.innerHTML = editorContentRef.current.innerHTML;
       
-      // Convert HTML nodes to DOCX paragraphs
       const docxElements: Paragraph[] = [];
       Array.from(tempDiv.childNodes).forEach(node => {
         const processed = processNodeForDocx(node);
         docxElements.push(...processed.filter(p => p !== null) as Paragraph[]);
       });
 
-      // Ensure we have at least one paragraph
       if (docxElements.length === 0) {
-        docxElements.push(new Paragraph({ text: "" }));
+        docxElements.push(new Paragraph({text: ""})); 
       }
 
       const doc = new Document({
@@ -431,9 +426,9 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
             {
               reference: 'default-numbering',
               levels: [
-                { level: 0, format: 'decimal', text: '%1.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 360 }}}},
-                { level: 1, format: 'lowerLetter', text: '%2.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 1440, hanging: 360 }}}},
-                { level: 2, format: 'lowerRoman', text: '%3.', alignment: AlignmentType.START, style: { paragraph: { indent: { left: 2160, hanging: 360 }}}},
+                { level: 0, format: 'decimal', text: '%1.', alignment: DocxAlignmentType.START, style: { paragraph: { indent: { left: 720, hanging: 360 }}}},
+                { level: 1, format: 'lowerLetter', text: '%2.', alignment: DocxAlignmentType.START, style: { paragraph: { indent: { left: 1440, hanging: 360 }}}},
+                { level: 2, format: 'lowerRoman', text: '%3.', alignment: DocxAlignmentType.START, style: { paragraph: { indent: { left: 2160, hanging: 360 }}}},
               ],
             },
           ],
@@ -442,7 +437,7 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
           default: {
             document: {
               run: {
-                size: 36, // 18pt font size (18 * 2 = 36 half-points) - Above 16pt requirement
+                size: 32, // 16pt font size (16 * 2 = 32 half-points)
                 font: "Times New Roman"
               },
               paragraph: {
@@ -459,14 +454,14 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
               basedOn: "Normal",
               next: "Normal",
               run: {
-                size: 56, // 28pt for H1 (28 * 2 = 56 half-points)
+                size: 48, // 24pt for H1 (24 * 2 = 48 half-points)
                 bold: true,
                 font: "Times New Roman"
               },
               paragraph: {
                 spacing: {
                   before: 480, // Space before heading
-                  after: 360   // Space after heading
+                  after: 240   // Space after heading
                 }
               }
             },
@@ -476,7 +471,7 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
               basedOn: "Normal",
               next: "Normal",
               run: {
-                size: 48, // 24pt for H2 (24 * 2 = 48 half-points)
+                size: 40, // 20pt for H2 (20 * 2 = 40 half-points)
                 bold: true,
                 font: "Times New Roman"
               },
@@ -493,7 +488,7 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
               basedOn: "Normal",
               next: "Normal",
               run: {
-                size: 40, // 20pt for H3 (20 * 2 = 40 half-points)
+                size: 36, // 18pt for H3 (18 * 2 = 36 half-points)
                 bold: true,
                 font: "Times New Roman"
               },
@@ -511,7 +506,7 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
               next: "Normal",
               run: {
                 font: "Courier New",
-                size: 28, // 14pt for code blocks (14 * 2 = 28 half-points)
+                size: 24, // 12pt for code blocks (12 * 2 = 24 half-points)
               },
               paragraph: {
                 shading: { type: ShadingType.SOLID, color: "auto", fill: "F1F1F1" },
@@ -521,255 +516,326 @@ export const DocumentDraftingView: React.FC<DocumentDraftingViewProps> = ({ onBa
                 }
               }
             }
-          ],
-          characterStyles: [
-            {
-              id: "Hyperlink",
-              name: "Hyperlink",
-              basedOn: "DefaultParagraphFont",
-              run: {
-                color: "0563C1",
-                underline: {
-                  type: UnderlineType.SINGLE,
-                  color: "0563C1"
-                },
-                size: 32 // 16pt for hyperlinks
-              }
-            }
           ]
         },
-        sections: [{
+        sections: [{ 
           properties: {
             page: {
-              margin: { top: 1440, right: 1440, bottom: 1440, left: 1440 }, // 1 inch margins
+              margin: { top: 720, right: 720, bottom: 720, left: 720 }, 
             },
           },
-          children: [
-            new Paragraph({
-              heading: HeadingLevel.HEADING_1,
-              children: [new TextRun({ text: currentTitle || 'Legal Document', size: 56, bold: true })],
-              spacing: {
-                after: 360
-              }
-            }),
-            new Paragraph({
-              children: [new TextRun({ text: `Generated on: ${new Date().toLocaleDateString('en-IN', { 
-                year: 'numeric', 
-                month: 'long', 
-                day: 'numeric' 
-              })}`, italics: true, size: 32 })],
-              spacing: {
-                after: 480
-              }
-            }),
-            ...docxElements
-          ],
+          children: docxElements 
         }],
       });
 
       const blob = await Packer.toBlob(doc);
-      const sanitizedTitle = (currentTitle || 'document').replace(/[^a-zA-Z0-9]/g, '_');
-      saveAs(blob, `${sanitizedTitle}.docx`);
-    } catch (error) {
-      console.error('Error exporting to DOCX:', error);
-      setError('Failed to export to DOCX. Please try again.');
+      saveAsFile(blob, `${currentTitle.replace(/[^a-zA-Z0-9]/g, '_') || 'document'}.docx`);
+
+    } catch (e) {
+      console.error("Error exporting DOCX:", e);
+      setError(e instanceof Error ? `DOCX Export Error: ${e.message}` : "Failed to export DOCX.");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [currentTitle]);
 
-  const handleExportTXT = () => {
-    if (!currentContent.trim()) return;
 
-    const blob = new Blob([currentContent], { type: 'text/plain;charset=utf-8' });
-    const sanitizedTitle = (currentTitle || 'document').replace(/[^a-zA-Z0-9]/g, '_');
-    saveAs(blob, `${sanitizedTitle}.txt`);
+  const handleExportTXT = useCallback(async () => {
+    if (!editorContentRef.current) {
+      alert("Editor content not found for export (TXT).");
+      return;
+    }
+    setIsLoading(true);
+    setError(null);
+    setDictationError(null);
+    try {
+      const tempDiv = document.createElement('div');
+      tempDiv.innerHTML = editorContentRef.current.innerHTML;
+      
+      Array.from(tempDiv.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, br, div.ql-clipboard, pre')).forEach(el => {
+        if (el.previousSibling && el.previousSibling.nodeName !== 'BR' && el.innerHTML.trim() !== "") {
+             const br = document.createElement('br');
+             el.parentNode?.insertBefore(br, el);
+        }
+        if(el.tagName === 'LI'){
+            const prefix = document.createTextNode("- ");
+            el.insertBefore(prefix, el.firstChild);
+        }
+      });
+      
+      let plainText = tempDiv.innerText || "";
+      plainText = plainText.replace(/\\n\\s*\\n/g, '\\n').trim();
+
+
+      const blob = new Blob([plainText], { type: 'text/plain;charset=utf-8' });
+      saveAsFile(blob, `${currentTitle.replace(/[^a-zA-Z0-9]/g, '_') || 'document'}.txt`);
+    } catch (e) {
+      console.error("Error exporting TXT:", e);
+      setError(e instanceof Error ? e.message : "Failed to export TXT.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentTitle]);
+
+  const handleSuggestedPromptClick = (prompt: string) => {
+    onInstructionsChange(prompt);
+    setShowSuggestedPrompts(false);
   };
+  
+  const MicIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className || "w-5 h-5"}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+    </svg>
+  );
+  const StopIcon = ({ className }: { className?: string }) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className={className || "w-5 h-5"}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 7.5A2.25 2.25 0 017.5 5.25h9a2.25 2.25 0 012.25 2.25v9a2.25 2.25 0 01-2.25 2.25h-9a2.25 2.25 0 01-2.25-2.25v-9z" />
+    </svg>
+  );
+  const SpinnerIcon = ({ className }: { className?: string }) => (
+     <svg className={`animate-spin ${className || "h-5 w-5 text-white"}`} xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+    </svg>
+  );
 
   const isProcessing = isLoading || isRecording || isTranscribing;
 
   return (
-    <div className="flex flex-col h-screen bg-slate-50 dark:bg-slate-900">
+    <div className="flex flex-col h-screen bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-gray-100">
       <Header onNavigateToDocumentation={navigateToDocumentation} />
-      <main className="flex-grow p-3 sm:p-4 md:p-6 overflow-y-auto custom-scrollbar space-y-4 flex flex-col">
-        
-        {/* Header with controls */}
-        <div className="flex items-center justify-between">
+      <main className="flex-grow p-3 sm:p-4 md:p-6 overflow-y-auto custom-scrollbar flex flex-col space-y-4">
+        <div className="flex items-center justify-between flex-wrap gap-y-2">
           <h2 className="text-xl sm:text-2xl font-semibold text-slate-800 dark:text-gray-100">
-            Document Drafting
+            Legal Document Drafting
           </h2>
-          <div className="flex gap-2">
+          <button
+            onClick={onBackToChat}
+            className="px-3 py-1.5 sm:px-4 sm:py-2 text-xs sm:text-sm font-medium rounded-md text-white bg-slate-600 hover:bg-slate-700 focus:outline-none focus:ring-2 focus:ring-slate-500"
+          >
+            &larr; Back to Chat
+          </button>
+        </div>
+        
+        {error && <div className="my-2 p-3 bg-red-100 dark:bg-red-700/20 border border-red-300 dark:border-red-600/50 text-red-700 dark:text-red-300 rounded-md text-sm animate-fade-in">{error}</div>}
+        {dictationError && <div className="my-2 p-3 bg-yellow-100 dark:bg-yellow-700/20 border border-yellow-300 dark:border-yellow-600/50 text-yellow-700 dark:text-yellow-300 rounded-md text-sm animate-fade-in">{dictationError}</div>}
+
+        {/* Saved Drafts Section */}
+        <div className="space-y-3 p-3 sm:p-4 bg-white dark:bg-slate-800 shadow-lg rounded-lg animate-fade-in-slide-up">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg sm:text-xl font-semibold text-slate-700 dark:text-slate-200">Saved Drafts</h3>
             <button
-              onClick={handleStartNewDocument}
-              disabled={isProcessing}
-              className="px-3 py-1.5 text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+              onClick={() => setShowSavedDrafts(!showSavedDrafts)}
+              className="px-3 py-1.5 text-xs font-medium rounded-md text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-500"
             >
-              New Document
-            </button>
-            <button
-              onClick={onBackToChat}
-              className="px-3 py-1.5 text-sm font-medium rounded-md text-slate-700 dark:text-slate-200 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600"
-            >
-              ← Back to Chat
+              {showSavedDrafts ? 'Hide Drafts' : `Show Drafts (${savedDrafts.length})`}
             </button>
           </div>
+          
+          {showSavedDrafts && (
+            <div className="mt-3">
+              {savedDrafts.length === 0 ? (
+                <p className="text-sm text-slate-500 dark:text-slate-400 text-center py-4">No saved drafts yet.</p>
+              ) : (
+                <div className="max-h-48 overflow-y-auto custom-scrollbar-thin">
+                  <div className="space-y-2">
+                    {savedDrafts.map((draft) => (
+                      <div
+                        key={draft.id}
+                        className="p-3 bg-slate-50 dark:bg-slate-700 rounded-md border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors"
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex-grow">
+                            <h4 className="font-medium text-sm text-slate-800 dark:text-white truncate" title={draft.title}>
+                              {draft.title}
+                            </h4>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                              {draft.instructions.substring(0, 100)}
+                              {draft.instructions.length > 100 ? '...' : ''}
+                            </p>
+                            <p className="text-xs text-slate-400 dark:text-slate-500 mt-1">
+                              {new Date(draft.updatedAt).toLocaleDateString()} at {new Date(draft.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </p>
+                          </div>
+                          <div className="flex gap-2 ml-3">
+                            <button
+                              onClick={() => handleLoadDraft(draft)}
+                              disabled={isProcessing}
+                              className="px-2 py-1 text-xs bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
+                            >
+                              Load
+                            </button>
+                            <button
+                              onClick={() => handleDeleteDraft(draft.id, draft.title)}
+                              disabled={isProcessing}
+                              className="px-2 py-1 text-xs bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 flex-grow min-h-0">
-          {/* Saved Drafts Sidebar */}
-          <div className="lg:col-span-1 bg-white dark:bg-slate-800 p-4 rounded-lg shadow-lg h-fit max-h-[600px] overflow-y-auto">
-            <h3 className="text-lg font-medium text-slate-800 dark:text-white mb-3">Saved Drafts</h3>
-            {savedDrafts.length === 0 ? (
-              <p className="text-slate-500 dark:text-slate-400 text-sm">No saved drafts yet</p>
-            ) : (
-              <div className="space-y-2">
-                {savedDrafts.map(draft => (
-                  <div key={draft.id} className="p-2 bg-slate-50 dark:bg-slate-700 rounded-md">
-                    <h4 className="font-medium text-sm text-slate-800 dark:text-white">{draft.title}</h4>
-                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
-                      {new Date(draft.timestamp).toLocaleDateString()}
-                    </p>
-                    <div className="flex gap-2 mt-2">
-                      <button
-                        onClick={() => handleLoadDraft(draft)}
-                        className="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700"
-                      >
-                        Load
-                      </button>
-                      <button
-                        onClick={() => handleDeleteDraft(draft.id)}
-                        className="text-xs px-2 py-1 bg-red-600 text-white rounded hover:bg-red-700"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+        {/* Section 1: Generate Legal Document */}
+        <div className="space-y-3 p-3 sm:p-4 bg-white dark:bg-slate-800 shadow-lg rounded-lg animate-fade-in-slide-up">
+          <div className="flex items-center justify-between">
+            <h3 className="text-lg sm:text-xl font-semibold text-slate-700 dark:text-slate-200">1. Describe your Document</h3>
+            <button
+              onClick={() => setShowSuggestedPrompts(!showSuggestedPrompts)}
+              className="px-3 py-1.5 text-xs font-medium rounded-md text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 focus:outline-none focus:ring-2 focus:ring-slate-500"
+            >
+              {showSuggestedPrompts ? 'Hide Suggestions' : 'Show Suggestions'}
+            </button>
+          </div>
+          <div>
+            <label htmlFor="userInstructions" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+              Provide detailed instructions for the legal document you want to generate (e.g., type of document, key parties, specific clauses, governing law, etc.):
+            </label>
+            <textarea
+              id="userInstructions"
+              rows={6}
+              value={currentInstructions}
+              onChange={(e) => onInstructionsChange(e.target.value)}
+              placeholder="Example: Draft a Non-Disclosure Agreement between [Party A] and [Party B] for the purpose of discussing a potential business venture. Include clauses for definition of confidential information, obligations, term (2 years), and jurisdiction (Mumbai, India)."
+              className="w-full p-2 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-gray-100 focus:ring-red-500 focus:border-red-500 text-sm custom-scrollbar-thin"
+              disabled={isProcessing}
+            />
           </div>
 
-          {/* Main Content */}
-          <div className="lg:col-span-3 space-y-4 flex flex-col min-h-0">
-            {/* Section 1: Instructions Input */}
-            <div className="space-y-3 p-3 sm:p-4 bg-white dark:bg-slate-800 shadow-lg rounded-lg animate-fade-in-slide-up">
-              <h3 className="text-lg sm:text-xl font-semibold text-slate-700 dark:text-slate-200">1. Provide Document Instructions</h3>
-              
-              {/* Error Messages */}
-              {error && (
-                <div className="p-3 bg-red-100 dark:bg-red-700/20 border border-red-300 dark:border-red-600/50 text-red-700 dark:text-red-300 rounded-md text-sm">
-                  {error}
+          {/* Suggested Prompts Section */}
+          {showSuggestedPrompts && (
+            <div className="mt-3 p-3 bg-slate-50 dark:bg-slate-700 rounded-md border border-slate-200 dark:border-slate-600">
+              <h4 className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">Suggested Document Types:</h4>
+              <div className="max-h-48 overflow-y-auto custom-scrollbar-thin">
+                <div className="grid grid-cols-1 gap-1">
+                  {DRAFTING_SUGGESTED_PROMPTS.map((prompt, index) => (
+                    <button
+                      key={index}
+                      onClick={() => handleSuggestedPromptClick(prompt)}
+                      className="text-left p-2 text-xs text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-600 rounded-md transition-colors duration-150"
+                    >
+                      {prompt}
+                    </button>
+                  ))}
                 </div>
-              )}
-              {dictationError && (
-                <div className="p-3 bg-yellow-100 dark:bg-yellow-700/20 border border-yellow-300 dark:border-yellow-600/50 text-yellow-700 dark:text-yellow-300 rounded-md text-sm">
-                  {dictationError}
-                </div>
-              )}
-
-              {/* Recording status */}
-              {(isRecording || isTranscribing) && (
-                <div className="text-center">
-                  <p className="text-sm text-slate-600 dark:text-slate-300">
-                    {isRecording ? `Recording: ${formatTime(displayDuration)}` : 
-                     isTranscribing ? 'Transcribing audio...' : ''}
-                  </p>
-                </div>
-              )}
-
-              <textarea
-                value={currentInstructions}
-                onChange={(e) => onInstructionsChange(e.target.value)}
-                placeholder="Example: Draft a comprehensive employment contract for a software engineer position in India, including clauses for intellectual property, confidentiality, termination conditions, and compliance with Indian labor laws."
-                className="w-full h-32 p-3 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-gray-100 focus:ring-red-500 focus:border-red-500 text-sm"
-                disabled={isProcessing}
-              />
-
-              <div className="flex flex-col sm:flex-row gap-2 sm:gap-3">
-                <button
-                  onClick={handleGenerateDocument}
-                  disabled={isProcessing}
-                  className="flex-grow sm:flex-grow-0 px-4 py-2 text-sm sm:text-base font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 disabled:opacity-50 flex items-center justify-center sm:min-w-[160px]"
-                >
-                  {isLoading ? (
-                    <>
-                      <SpinnerIcon className="-ml-1 mr-2 h-5 w-5 text-white" />
-                      Generating...
-                    </>
-                  ) : (
-                    'Generate Document'
-                  )}
-                </button>
-                
-                <button
-                  onClick={handleDictateClick}
-                  disabled={isLoading || isTranscribing}
-                  className={`flex-grow sm:flex-grow-0 px-4 py-2 text-sm sm:text-base font-medium rounded-md text-white focus:outline-none focus:ring-2 focus:ring-opacity-50 flex items-center justify-center sm:min-w-[160px]
-                    ${isRecording ? 'bg-yellow-500 hover:bg-yellow-600 focus:ring-yellow-400' : 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-500'}
-                    ${isTranscribing ? 'bg-gray-400 cursor-not-allowed' : ''}
-                  `}
-                >
-                  {isTranscribing ? (
-                    <>
-                      <SpinnerIcon className="-ml-1 mr-2 h-5 w-5 text-white" />
-                      Transcribing...
-                    </>
-                  ) : isRecording ? (
-                    <>
-                      <StopIcon className="-ml-1 mr-2 w-5 h-5" /> Stop Recording
-                    </>
-                  ) : (
-                    <>
-                      <MicIcon className="-ml-1 mr-2 w-5 h-5" /> Dictate
-                    </>
-                  )}
-                </button>
               </div>
             </div>
+          )}
 
-            {/* Section 2: Document Editor */}
-            <div className="space-y-3 p-3 sm:p-4 bg-white dark:bg-slate-800 shadow-lg rounded-lg flex-grow flex flex-col min-h-0 animate-fade-in-slide-up"> 
-              <h3 className="text-lg sm:text-xl font-semibold text-slate-700 dark:text-slate-200">2. Edit & Export Document</h3>
-              
-              <div>
-                <label htmlFor="documentTitle" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-                  Document Title:
-                </label>
-                <input
-                  type="text"
-                  id="documentTitle"
-                  value={currentTitle}
-                  onChange={(e) => onTitleChange(e.target.value)}
-                  className="w-full p-2 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-gray-100 focus:ring-red-500 focus:border-red-500 text-sm"
-                  placeholder="Enter document title"
-                />
-              </div>
-              
-              <div className="mb-3 space-y-2"> 
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h4 className="text-md font-medium text-slate-700 dark:text-slate-300">Actions:</h4>
-                    <div className="flex flex-wrap gap-2">
-                        <button 
-                          onClick={handleSaveDraft} 
-                          disabled={isProcessing || (!currentInstructions.trim() && !currentContent.trim())} 
-                          className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
-                        >
-                          {isProcessing ? 'Processing...' : 'Save Draft'}
-                        </button>
-                        <button onClick={handleExportDOCX} disabled={isLoading || !currentContent.trim()} className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
-                            {isLoading && 'Processing...' || 'Export DOCX'}
-                        </button>
-                        <button onClick={handleExportTXT} disabled={isLoading || !currentContent.trim()} className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
-                             {isLoading && 'Processing...' || 'Export TXT'}
-                        </button>
-                    </div>
-                </div>
-              </div>
-
-              <div className="flex-grow border border-slate-300 dark:border-slate-700 rounded-md"> 
-                <RichTextEditor value={currentContent} onChange={onContentChange} placeholder="AI generated document will appear here. You can also start typing..." />
-              </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button
+              onClick={handleGenerateDocument}
+              disabled={isProcessing || !currentInstructions.trim()}
+              className="flex-grow sm:flex-grow-0 px-4 py-2 text-sm sm:text-base font-medium rounded-md text-white bg-red-600 hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:bg-red-400 dark:disabled:bg-red-700 disabled:cursor-not-allowed flex items-center justify-center sm:min-w-[160px]"
+            >
+              {isLoading && !error && !dictationError ? (
+                <>
+                  <SpinnerIcon className="-ml-1 mr-2 h-5 w-5 text-white" />
+                  Generating...
+                </>
+              ) : (
+                'Generate Document'
+              )}
+            </button>
+            <button
+              onClick={handleDictateClick}
+              disabled={isLoading || isTranscribing}
+              className={`flex-grow sm:flex-grow-0 px-4 py-2 text-sm sm:text-base font-medium rounded-md text-white focus:outline-none focus:ring-2 focus:ring-opacity-50 flex items-center justify-center sm:min-w-[160px]
+                ${isRecording ? 'bg-yellow-500 hover:bg-yellow-600 focus:ring-yellow-400' : 'bg-blue-600 hover:bg-blue-700 focus:ring-blue-500'}
+                ${isTranscribing ? 'bg-gray-400 cursor-not-allowed' : ''}
+              `}
+            >
+              {isTranscribing ? (
+                <>
+                  <SpinnerIcon className="-ml-1 mr-2 h-5 w-5 text-white" />
+                  Transcribing...
+                </>
+              ) : isRecording ? (
+                <>
+                  <StopIcon className="-ml-1 mr-2 w-5 h-5" /> Stop Recording
+                </>
+              ) : (
+                <>
+                  <MicIcon className="-ml-1 mr-2 w-5 h-5" /> Dictate
+                </>
+              )}
+            </button>
+            <button
+              onClick={() => setOptimizeDraftingPromptEnabled(!optimizeDraftingPromptEnabled)}
+              disabled={isProcessing}
+              className={`flex-grow sm:flex-grow-0 px-4 py-2 text-sm sm:text-base font-medium rounded-md text-white focus:outline-none focus:ring-2 focus:ring-opacity-50 flex items-center justify-center sm:min-w-[160px] transition-colors
+                ${optimizeDraftingPromptEnabled ? 'bg-green-600 hover:bg-green-700 focus:ring-green-500' : 'bg-gray-600 hover:bg-gray-700 focus:ring-gray-500'}
+                ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}
+              `}
+              title={optimizeDraftingPromptEnabled ? 'Prompt optimization is enabled - your instructions will be enhanced for better results' : 'Prompt optimization is disabled - your instructions will be used as-is'}
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 mr-2">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.847a4.5 4.5 0 003.09 3.09L15.75 12l-2.847.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423L16.5 15.75l.394 1.183a2.25 2.25 0 001.423 1.423L19.5 18.75l-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+              </svg>
+              {optimizeDraftingPromptEnabled ? 'Optimize: ON' : 'Optimize: OFF'}
+            </button>
+          </div>
+          
+          {optimizeDraftingPromptEnabled && (
+            <div className="mt-2 text-xs text-slate-500 dark:text-slate-400">
+              <span className="inline-flex items-center">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-3 h-3 mr-1">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                </svg>
+                Prompt optimization is enabled. Your instructions will be enhanced for better AI understanding and more accurate document generation with latest legal information.
+              </span>
             </div>
+          )}
+        </div>
+
+        {/* Section 2: Document Editor */}
+        <div className="space-y-3 p-3 sm:p-4 bg-white dark:bg-slate-800 shadow-lg rounded-lg flex-grow flex flex-col min-h-0 animate-fade-in-slide-up"> 
+          <h3 className="text-lg sm:text-xl font-semibold text-slate-700 dark:text-slate-200">2. Edit & Export Document</h3>
+          
+          <div>
+            <label htmlFor="documentTitle" className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+              Document Title:
+            </label>
+            <input
+              type="text"
+              id="documentTitle"
+              value={currentTitle}
+              onChange={(e) => onTitleChange(e.target.value)}
+              className="w-full p-2 border border-slate-300 dark:border-slate-600 rounded-md bg-white dark:bg-slate-700 text-slate-900 dark:text-gray-100 focus:ring-red-500 focus:border-red-500 text-sm"
+              placeholder="Enter document title"
+            />
+          </div>
+          
+          <div className="mb-3 space-y-2"> 
+            <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="text-md font-medium text-slate-700 dark:text-slate-300">Actions:</h4>
+                <div className="flex flex-wrap gap-2">
+                    <button 
+                      onClick={handleSaveDraft} 
+                      disabled={isProcessing || (!currentInstructions.trim() && !currentContent.trim())} 
+                      className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-green-600 hover:bg-green-700 disabled:opacity-50"
+                    >
+                      {isProcessing ? 'Processing...' : 'Save Draft'}
+                    </button>
+                    <button onClick={handleExportDOCX} disabled={isLoading || !currentContent.trim()} className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+                        {isLoading && 'Processing...' || 'Export DOCX'}
+                    </button>
+                    <button onClick={handleExportTXT} disabled={isLoading || !currentContent.trim()} className="px-3 py-1.5 text-xs sm:text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50">
+                         {isLoading && 'Processing...' || 'Export TXT'}
+                    </button>
+                </div>
+            </div>
+          </div>
+
+          <div className="flex-grow border border-slate-300 dark:border-slate-700 rounded-md"> 
+            <RichTextEditor value={currentContent} onChange={onContentChange} placeholder="AI generated document will appear here. You can also start typing..." />
           </div>
         </div>
         

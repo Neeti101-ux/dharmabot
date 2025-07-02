@@ -17,6 +17,7 @@ import { ProcessedFile, ChatSession, ChatMessage, UserQueryMessage, AIResponseMe
 import { getAIResponse } from './services/geminiService';
 import { saveChatSession, getAllChatSessions, deleteChatSession as deleteSessionFromStorage } from './services/localStorageService';
 import { getCurrentUserSession, logoutUser as serviceLogoutUser } from './services/authService';
+import { rephraseQueryForAI } from './services/geminiService';
 
 const generateUUID = () => crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15);
 
@@ -160,6 +161,11 @@ const App: React.FC = () => {
     setChatInputFiles([]);
 
     try {
+      // Step 1: Rephrase the user query for better AI understanding
+      console.log("Original user query:", userMessage.queryText);
+      const rephrasedQuery = await rephraseQueryForAI(userMessage.queryText);
+      console.log("Rephrased query for AI:", rephrasedQuery);
+
       const documentsForAI: DocumentInfoForAI[] = chatInputFiles
         .filter(pf => pf.status === 'processed')
         .map(pf => ({
@@ -170,7 +176,7 @@ const App: React.FC = () => {
         }));
 
       const payloadForAI: QueryPayload = {
-        userQuery: userMessage.queryText, // Use the original query
+        userQuery: rephrasedQuery, // Use the rephrased query instead of original
         documents: documentsForAI.length > 0 ? documentsForAI : undefined,
         chatHistory: currentChatHistory,
         enableGoogleSearch: chatInputWebSearchEnabled,

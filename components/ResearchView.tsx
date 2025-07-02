@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Header } from './Header';
 import { Footer } from './Footer';
 import { performDeepResearch } from '../services/geminiService';
+import { rephraseQueryForAI } from '../services/geminiService';
 import { transcribeAudioWithGemini } from '../services/geminiService';
 import { marked } from 'marked';
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, UnderlineType, ShadingType, AlignmentType, ExternalHyperlink, IRunOptions } from 'docx';
@@ -158,6 +159,7 @@ export const ResearchView: React.FC<ResearchViewProps> = ({ onBackToChat }) => {
   const [citations, setCitations] = useState<GroundingChunk[]>([]);
   const [savedResearch, setSavedResearch] = useState<SavedResearch[]>(getSavedResearch);
   const [researchTitle, setResearchTitle] = useState<string>('');
+  const [optimizePromptEnabled, setOptimizePromptEnabled] = useState<boolean>(true);
 
   const navigateToDocumentation = () => {
     window.open('/documentation', '_blank');
@@ -350,7 +352,17 @@ export const ResearchView: React.FC<ResearchViewProps> = ({ onBackToChat }) => {
     setDictationError(null);
 
     try {
-      const result = await performDeepResearch(query);
+      let finalQuery = query;
+      
+      // Step 1: Optimize the query if enabled
+      if (optimizePromptEnabled) {
+        console.log("Original research query:", query);
+        finalQuery = await rephraseQueryForAI(query);
+        console.log("Optimized research query:", finalQuery);
+      }
+      
+      // Step 2: Perform the research with the final query
+      const result = await performDeepResearch(finalQuery);
       setResearchResults(result.text);
       setCitations(result.sources || []);
       setResearchTitle(query.substring(0, 50) + (query.length > 50 ? '...' : ''));
@@ -758,7 +770,32 @@ export const ResearchView: React.FC<ResearchViewProps> = ({ onBackToChat }) => {
                   )}
                 </button>
                 
+                <button
+                  onClick={() => setOptimizePromptEnabled(!optimizePromptEnabled)}
+                  disabled={isProcessing}
+                  className={`px-4 py-2 text-white rounded-md focus:outline-none focus:ring-2 focus:ring-opacity-50 flex items-center transition-colors
+                    ${optimizePromptEnabled ? 'bg-green-600 hover:bg-green-700 focus:ring-green-500' : 'bg-gray-600 hover:bg-gray-700 focus:ring-gray-500'}
+                    ${isProcessing ? 'opacity-50 cursor-not-allowed' : ''}
+                  `}
+                  title={optimizePromptEnabled ? 'Query optimization is enabled - your query will be enhanced for better results' : 'Query optimization is disabled - your query will be used as-is'}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 mr-2">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.847a4.5 4.5 0 003.09 3.09L15.75 12l-2.847.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423L16.5 15.75l.394 1.183a2.25 2.25 0 001.423 1.423L19.5 18.75l-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+                  </svg>
+                  {optimizePromptEnabled ? 'Optimize: ON' : 'Optimize: OFF'}
+                </button>
               </div>
+              
+              {optimizePromptEnabled && (
+                <div className="mt-2 text-xs text-slate-400">
+                  <span className="inline-flex items-center">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-3 h-3 mr-1">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M11.25 11.25l.041-.02a.75.75 0 011.063.852l-.708 2.836a.75.75 0 001.063.853l.041-.021M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9-3.75h.008v.008H12V8.25z" />
+                    </svg>
+                    Query optimization is enabled. Your research query will be enhanced for better AI understanding and more comprehensive results.
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="bg-white dark:bg-slate-800 p-4 rounded-lg shadow-lg">
